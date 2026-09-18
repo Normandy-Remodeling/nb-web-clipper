@@ -190,6 +190,7 @@ async function saveFromPopup(selection) {
 	}
 	await business.saveTabs([tab], {
 		saveWithNormandyBackend: true,
+		nbClipperProjectId: selection.projectId || "",
 		nbClipperFolderName: selection.folderName,
 		nbClipperSubfolderName: selection.subFolderName
 	});

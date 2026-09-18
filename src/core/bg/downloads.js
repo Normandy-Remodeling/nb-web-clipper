@@ -228,7 +228,7 @@ async function downloadContent(contents, tab, incognito, message) {
 					filenameConflictAction: message.filenameConflictAction
 				});
 			} else if (message.saveWithNormandyBackend) {
-				response = await saveWithNormandyBackend(message.taskId, message.filename, contents.join(""), tab.url, message.normandyBackendUrl, message.nbClipperFolderName, message.nbClipperSubfolderName, tab.id);
+				response = await saveWithNormandyBackend(message.taskId, message.filename, contents.join(""), tab.url, message.normandyBackendUrl, message.nbClipperProjectId, message.nbClipperFolderName, message.nbClipperSubfolderName, tab.id);
 			} else if (message.saveToRestFormApi) {
 				response = await saveToRestFormApi(
 					message.taskId,
@@ -368,7 +368,7 @@ async function downloadCompressedContent(message, tab) {
 				});
 				await response.pushPromise;
 			} else if (message.saveWithNormandyBackend) {
-				response = await saveWithNormandyBackend(message.taskId, message.filename, blob, tab.url, message.normandyBackendUrl, message.nbClipperFolderName, message.nbClipperSubfolderName, tab.id);
+				response = await saveWithNormandyBackend(message.taskId, message.filename, blob, tab.url, message.normandyBackendUrl, message.nbClipperProjectId, message.nbClipperFolderName, message.nbClipperSubfolderName, tab.id);
 			} else if (message.saveToRestFormApi) {
 				response = await saveToRestFormApi(
 					message.taskId,
@@ -679,7 +679,7 @@ async function downloadPageForeground(taskId, filename, content, mimeType, tabId
 	return browser.tabs.sendMessage(tabId, { method: "content.download" });
 }
 
-async function saveWithNormandyBackend(taskId, filename, content, sourceUrl, backendUrl, folderName, subfolderName, tabId) {
+async function saveWithNormandyBackend(taskId, filename, content, sourceUrl, backendUrl, projectId, folderName, subfolderName, tabId) {
 	const controller = new AbortController();
 	try {
 		if (!backendUrl) {
@@ -701,6 +701,9 @@ async function saveWithNormandyBackend(taskId, filename, content, sourceUrl, bac
 		formData.append("file", blob, filename);
 		formData.append("screenshot", screenshotBlob, getScreenshotFilename(filename));
 		formData.append("url", sourceUrl);
+		if (projectId) {
+			formData.append("projectId", projectId);
+		}
 		if (folderName) {
 			formData.append("folderName", folderName);
 		}

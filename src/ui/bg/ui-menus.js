@@ -21,7 +21,7 @@
  *   Source.
  */
 
-/* global browser, URL */
+/* global browser, URL, atob */
 
 import * as config from "./../../core/bg/config.js";
 import { queryTabs } from "./../../core/bg/tabs-util.js";
@@ -32,6 +32,7 @@ import * as button from "./ui-button.js";
 
 const menus = browser.menus;
 const BROWSER_MENUS_API_SUPPORTED = menus && menus.onClicked && menus.create && menus.update && menus.removeAll;
+const IS_MANIFEST_V3 = browser.runtime.getManifest().manifest_version == 3;
 const MENU_ID_SAVE_PAGE = "save-page";
 const MENU_ID_EDIT_AND_SAVE_PAGE = "edit-and-save-page";
 const MENU_ID_SAVE_WITH_PROFILE = "save-with-profile";
@@ -59,6 +60,7 @@ const MENU_ID_AUTO_SAVE_UNPINNED = "auto-save-unpinned";
 const MENU_ID_AUTO_SAVE_ALL = "auto-save-all";
 const MENU_ID_NORMANDY_SIGN_IN = "nb-clipper-sign-in";
 const MENU_ID_NORMANDY_SAVE_LOCATION = "nb-clipper-save-location";
+const MENU_ID_NORMANDY_QUICK_SAVE = "nb-clipper-quick-save";
 const MENU_ID_EXTRA = "extra";
 const MENU_CREATE_DOMAIN_RULE_MESSAGE = browser.i18n.getMessage("menuCreateDomainRule");
 const MENU_UPDATE_RULE_MESSAGE = browser.i18n.getMessage("menuUpdateRule");
@@ -119,9 +121,40 @@ function onMessage(message) {
 }
 
 async function createMenus(tab) {
+	if (!BROWSER_MENUS_API_SUPPORTED) {
+		return;
+	}
+
+	// Chrome Manifest V3 runs this code in a service worker. The inherited
+	// SingleFile menu builder mixes legacy menu contexts and profile state that
+	// are not needed for the Normandy workflow, and on MV3 it can fail before
+	// Chrome exposes any extension entry in the page context menu. Register the
+	// one Normandy command directly so the right-click path is deterministic.
+	if (IS_MANIFEST_V3) {
+		await menus.removeAll();
+		const nbClipperState = await browser.storage.local.get(["nbClipperAuth", "nbClipperPopupSelection"]);
+		const nbClipperSelection = nbClipperState.nbClipperPopupSelection;
+		const nbClipperReady = Boolean(
+			nbClipperState.nbClipperAuth &&
+			isCurrentJwt(nbClipperState.nbClipperAuth.token) &&
+			nbClipperSelection &&
+			nbClipperSelection.folderName &&
+			nbClipperSelection.subFolderName
+		);
+		await menus.create({
+			id: MENU_ID_NORMANDY_QUICK_SAVE,
+			contexts: ["page", "frame", "image", "link", "video", "audio", "selection"],
+			title: nbClipperReady ?
+				"NB Clipper: Save to last location" :
+				"NB Clipper: Choose save location..."
+		});
+		menusCreated = true;
+		return;
+	}
+
 	const [profiles, allTabsData] = await Promise.all([config.getProfiles(), tabsData.get()]);
 	let options = await config.getOptions(tab && tab.url);
-	if (BROWSER_MENUS_API_SUPPORTED && options) {
+	if (options) {
 		const pageContextsEnabled = ["page", "frame", "image", "link", "video", "audio", "selection"];
 		const defaultContextsDisabled = [];
 		if (options.profileName == config.DISABLED_PROFILE_NAME) {
@@ -145,6 +178,22 @@ async function createMenus(tab) {
 			}
 		}
 		await menus.removeAll();
+		const nbClipperState = await browser.storage.local.get(["nbClipperAuth", "nbClipperPopupSelection"]);
+		const nbClipperSelection = nbClipperState.nbClipperPopupSelection;
+		const nbClipperReady = Boolean(
+			nbClipperState.nbClipperAuth &&
+			isCurrentJwt(nbClipperState.nbClipperAuth.token) &&
+			nbClipperSelection &&
+			nbClipperSelection.folderName &&
+			nbClipperSelection.subFolderName
+		);
+		menus.create({
+			id: MENU_ID_NORMANDY_QUICK_SAVE,
+			contexts: pageContextsEnabled,
+			title: nbClipperReady ?
+				"NB Clipper: Save to last location" :
+				"NB Clipper: Choose save location..."
+		});
 		const defaultContextsEnabled = defaultContextsDisabled.concat(...pageContextsEnabled);
 		const defaultContexts = options.contextMenuEnabled ? defaultContextsEnabled : defaultContextsDisabled;
 		menus.create({
@@ -436,10 +485,57 @@ async function createMenus(tab) {
 	}
 }
 
+async function openNbClipperPopup() {
+	const actionApi = browser.action || browser.browserAction;
+	if (actionApi && typeof actionApi.openPopup == "function") {
+		try {
+			await actionApi.openPopup();
+			return;
+		} catch {
+			// Fall back to a normal extension tab below.
+		}
+	}
+	await browser.tabs.create({ active: true, url: "/src/ui/pages/nb-clipper-popup.html" });
+}
+
+function isCurrentJwt(token) {
+	if (typeof token != "string") {
+		return false;
+	}
+	const parts = token.split(".");
+	if (parts.length != 3) {
+		return false;
+	}
+	try {
+		const base64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+		const payload = JSON.parse(atob(base64.padEnd(Math.ceil(base64.length / 4) * 4, "=")));
+		return typeof payload.exp == "number" && payload.exp > Math.floor(Date.now() / 1000);
+	} catch {
+		return false;
+	}
+}
+
 async function initialize() {
 	if (BROWSER_MENUS_API_SUPPORTED) {
-		createMenus();
 		menus.onClicked.addListener(async (event, tab) => {
+			if (event.menuItemId == MENU_ID_NORMANDY_QUICK_SAVE) {
+				const stored = await browser.storage.local.get(["nbClipperAuth", "nbClipperPopupSelection"]);
+				const selection = stored.nbClipperPopupSelection;
+				if (!stored.nbClipperAuth || !isCurrentJwt(stored.nbClipperAuth.token) ||
+					!selection || !selection.folderName || !selection.subFolderName) {
+					await openNbClipperPopup();
+					return;
+				}
+				if (!business.isSavingTab(tab)) {
+					await business.saveTabs([tab], {
+						saveWithNormandyBackend: true,
+						nbClipperProjectId: selection.projectId || "",
+						nbClipperFolderName: selection.folderName,
+						nbClipperSubfolderName: selection.subFolderName
+					});
+				}
+				return;
+			}
 			if (event.menuItemId == MENU_ID_SAVE_PAGE) {
 				if (event.linkUrl) {
 					business.saveUrls([event.linkUrl]);
@@ -566,9 +662,12 @@ async function initialize() {
 				}
 			}
 		});
-		if (menusCreated) {
-			pendingRefresh = true;
-		} else {
+		try {
+			await createMenus();
+		} catch (error) {
+			console.error("NB Clipper context menu could not be created", error);
+		}
+		if (!menusCreated) {
 			(await browser.tabs.query({})).forEach(async tab => await refreshTab(tab));
 		}
 	}
@@ -587,6 +686,14 @@ async function refreshExternalComponents(tab) {
 }
 
 async function refreshTab(tab) {
+	if (IS_MANIFEST_V3 && BROWSER_MENUS_API_SUPPORTED) {
+		try {
+			await createMenus(tab);
+		} catch (error) {
+			console.error("NB Clipper context menu could not be refreshed", error);
+		}
+		return;
+	}
 	if (BROWSER_MENUS_API_SUPPORTED && menusCreated) {
 		const promises = [];
 		const allTabsData = await tabsData.get(tab.id);

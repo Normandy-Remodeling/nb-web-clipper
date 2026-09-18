@@ -113,6 +113,7 @@ async function downloadPage(pageData, options) {
 		saveToRestFormApi: options.saveToRestFormApi,
 		saveWithNormandyBackend: options.saveWithNormandyBackend,
 		normandyBackendUrl: options.normandyBackendUrl,
+		nbClipperProjectId: options.nbClipperProjectId,
 		nbClipperFolderName: options.nbClipperFolderName,
 		nbClipperSubfolderName: options.nbClipperSubfolderName,
 		saveToRestFormApiUrl: options.saveToRestFormApiUrl,

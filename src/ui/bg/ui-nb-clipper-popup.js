@@ -22,12 +22,13 @@ const status = document.getElementById("status");
 let auth;
 let apiUrl;
 let savedSelection;
+let selectionWritePromise = Promise.resolve();
 
 loginForm.addEventListener("submit", login);
 saveForm.addEventListener("submit", savePage);
 clientSelect.addEventListener("change", clientChanged);
 itemSelect.addEventListener("change", itemChanged);
-customItemInput.addEventListener("input", refreshSaveButton);
+customItemInput.addEventListener("input", customItemChanged);
 settingsButton.addEventListener("click", openSettings);
 logoutButton.addEventListener("click", logout);
 
@@ -35,13 +36,21 @@ initialize();
 
 async function initialize() {
 	apiUrl = NORMANDY_BACKEND_URL;
-	const stored = await browser.storage.local.get(["nbClipperAuth", "nbClipperPopupSelection"]);
+	const stored = await browser.storage.local.get(["nbClipperAuth", "nbClipperPopupSelection", "nbClipperLastUsername"]);
 	auth = stored.nbClipperAuth;
 	savedSelection = stored.nbClipperPopupSelection;
+	if (stored.nbClipperLastUsername) {
+		usernameInput.value = stored.nbClipperLastUsername;
+	}
 	if (auth && isCurrentJwt(auth.token)) {
 		await showSaveForm();
 	} else {
 		if (auth) {
+			const lastUsername = auth.username || auth.email;
+			if (lastUsername) {
+				await browser.storage.local.set({ nbClipperLastUsername: lastUsername });
+				usernameInput.value = lastUsername;
+			}
 			await browser.storage.local.remove("nbClipperAuth");
 		}
 		showLoginForm();
@@ -71,7 +80,11 @@ function showLoginForm(message) {
 	signedInActions.hidden = true;
 	loginForm.hidden = false;
 	setStatus(message || "Log in with your Normandy account.");
-	usernameInput.focus();
+	if (!usernameInput.value) {
+		usernameInput.focus();
+	} else {
+		passwordInput.focus();
+	}
 }
 
 async function showSaveForm() {
@@ -83,11 +96,11 @@ async function showSaveForm() {
 	setSelectMessage(itemSelect, "Select a client first");
 	try {
 		const clients = await fetchRoute("save-locations",
-			["name"],
-			["name"],
+			["displayName", "name"],
+			["projectId", "name"],
 			"folders");
 		fillSelect(clientSelect, clients, "Select a client",
-			savedSelection && (savedSelection.folderName || savedSelection.client));
+			savedSelection && (savedSelection.projectId || savedSelection.folderName || savedSelection.client));
 		setStatus("");
 		if (clientSelect.value) {
 			await loadItems(clientSelect.value, savedSelection &&
@@ -132,7 +145,10 @@ async function login(event) {
 			await browser.storage.local.remove(["nbClipperSaveLocation", "nbClipperPopupSelection"]);
 			savedSelection = null;
 		}
-		await browser.storage.local.set({ nbClipperAuth: auth });
+		await browser.storage.local.set({
+			nbClipperAuth: auth,
+			nbClipperLastUsername: auth.username || auth.email || username
+		});
 		passwordInput.value = "";
 		await showSaveForm();
 	} catch (error) {
@@ -146,6 +162,7 @@ async function clientChanged() {
 	const client = clientSelect.value;
 	saveButton.disabled = true;
 	hideCustomItemInput();
+	await persistSelection("");
 	if (!client) {
 		setSelectMessage(itemSelect, "Select a client first");
 		return;
@@ -168,7 +185,7 @@ async function loadItems(client, selectedItem) {
 			itemSelect.value = OTHER_ITEM_VALUE;
 			customItemInput.value = selectedItem;
 		}
-		itemChanged();
+		await itemChanged();
 		setStatus("");
 	} catch (error) {
 		await handleRequestError(error, "Could not load items.");
@@ -214,7 +231,11 @@ function normalizeOptions(values, labelKeys, valueKeys) {
 		const valueKey = valueKeys.find(key => value && value[key]);
 		return labelKey && valueKey ? {
 			label: String(value[labelKey]),
-			value: String(value[valueKey])
+			value: String(value[valueKey]),
+			folderName: value.name ? String(value.name) : "",
+			projectId: value.projectId ? String(value.projectId) : "",
+			customerId: value.customerId ? String(value.customerId) : "",
+			jobNumber: value.jobNumber == null ? "" : String(value.jobNumber)
 		} : null;
 	}).filter(Boolean);
 }
@@ -222,11 +243,37 @@ function normalizeOptions(values, labelKeys, valueKeys) {
 function fillSelect(select, options, placeholder, selectedValue) {
 	select.replaceChildren(new Option(placeholder, ""));
 	for (const option of options) {
-		select.add(new Option(option.label, option.value));
+		const optionElement = new Option(option.label, option.value);
+		if (option.folderName) {
+			optionElement.dataset.folderName = option.folderName;
+		}
+		if (option.projectId) {
+			optionElement.dataset.projectId = option.projectId;
+		}
+		if (option.customerId) {
+			optionElement.dataset.customerId = option.customerId;
+		}
+		if (option.jobNumber) {
+			optionElement.dataset.jobNumber = option.jobNumber;
+		}
+		select.add(optionElement);
 	}
 	select.disabled = !options.length;
-	if (options.some(option => option.value == selectedValue)) {
-		select.value = selectedValue;
+
+	// Prefer an exact project/value match. Older saved clipper selections only
+	// stored the SharePoint folder name; do not silently choose the first match
+	// when that folder now represents more than one project/job.
+	const exactSelectedOption = options.find(option =>
+		option.value == selectedValue
+	);
+	const folderMatches = options.filter(option =>
+		option.folderName == selectedValue
+	);
+	const selectedOption = exactSelectedOption ||
+		(folderMatches.length == 1 ? folderMatches[0] : null);
+
+	if (selectedOption) {
+		select.value = selectedOption.value;
 	}
 }
 
@@ -235,7 +282,7 @@ function setSelectMessage(select, message) {
 	select.disabled = true;
 }
 
-function itemChanged() {
+async function itemChanged() {
 	const customItemSelected = itemSelect.value == OTHER_ITEM_VALUE;
 	customItemFields.hidden = !customItemSelected;
 	customItemInput.required = customItemSelected;
@@ -245,6 +292,37 @@ function itemChanged() {
 		customItemInput.value = "";
 	}
 	refreshSaveButton();
+	await persistSelection();
+}
+
+async function customItemChanged() {
+	refreshSaveButton();
+	await persistSelection();
+}
+
+async function persistSelection(itemNameOverride) {
+	if (!clientSelect.value) {
+		savedSelection = null;
+		selectionWritePromise = selectionWritePromise.then(() =>
+			browser.storage.local.remove("nbClipperPopupSelection")
+		);
+		await selectionWritePromise;
+		return;
+	}
+	const selectedClient = clientSelect.selectedOptions[0];
+	const itemName = itemNameOverride !== undefined ? itemNameOverride :
+		(itemSelect.value == OTHER_ITEM_VALUE ?
+			customItemInput.value.trim() : (itemSelect.value || ""));
+	const selection = {
+		projectId: selectedClient && selectedClient.dataset.projectId || "",
+		folderName: selectedClient && selectedClient.dataset.folderName || clientSelect.value,
+		subFolderName: itemName
+	};
+	savedSelection = selection;
+	selectionWritePromise = selectionWritePromise.then(() =>
+		browser.storage.local.set({ nbClipperPopupSelection: selection })
+	);
+	await selectionWritePromise;
 }
 
 function hideCustomItemInput() {
@@ -266,8 +344,10 @@ async function savePage(event) {
 	try {
 		const itemName = itemSelect.value == OTHER_ITEM_VALUE ?
 			customItemInput.value.trim() : itemSelect.value;
+		const selectedClient = clientSelect.selectedOptions[0];
 		const selection = {
-			folderName: clientSelect.value,
+			projectId: selectedClient && selectedClient.dataset.projectId || "",
+			folderName: selectedClient && selectedClient.dataset.folderName || clientSelect.value,
 			subFolderName: itemName
 		};
 		await browser.storage.local.set({ nbClipperPopupSelection: selection });
