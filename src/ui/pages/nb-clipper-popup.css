@@ -72,3 +72,17 @@ button {
 .secondary-button {
 	margin-top: 0;
 }
+
+.custom-item-help {
+	margin: 0;
+	font-size: 12px;
+	color: GrayText;
+}
+
+/* Full job details remain readable when the native select truncates them. */
+.client-job-details {
+  margin: -2px 0 2px;
+  color: GrayText;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}

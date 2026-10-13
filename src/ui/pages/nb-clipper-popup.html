@@ -27,6 +27,7 @@
 			<select id="clientSelect" required disabled>
 				<option value="">Loading clients...</option>
 			</select>
+			<p id="clientJobDetails" class="client-job-details" hidden></p>
 
 			<label for="itemSelect">Item</label>
 			<select id="itemSelect" required disabled>
@@ -34,8 +35,12 @@
 			</select>
 
 			<div id="customItemFields" hidden>
-				<label for="customItemInput">Custom item name</label>
+				<label for="customRoomInput">Room (required)</label>
+				<input id="customRoomInput" type="text" autocomplete="off">
+
+				<label for="customItemInput">PAW item name (required)</label>
 				<input id="customItemInput" type="text" autocomplete="off">
+				<p class="custom-item-help">Saved as Room - Item (for example, Kitchen - Countertop sample).</p>
 			</div>
 
 			<button id="saveButton" type="submit" disabled>Save</button>

@@ -10,8 +10,10 @@ const passwordInput = document.getElementById("passwordInput");
 const loginButton = document.getElementById("loginButton");
 const saveForm = document.getElementById("saveForm");
 const clientSelect = document.getElementById("clientSelect");
+const clientJobDetails = document.getElementById("clientJobDetails");
 const itemSelect = document.getElementById("itemSelect");
 const customItemFields = document.getElementById("customItemFields");
+const customRoomInput = document.getElementById("customRoomInput");
 const customItemInput = document.getElementById("customItemInput");
 const saveButton = document.getElementById("saveButton");
 const signedInActions = document.getElementById("signedInActions");
@@ -28,6 +30,7 @@ loginForm.addEventListener("submit", login);
 saveForm.addEventListener("submit", savePage);
 clientSelect.addEventListener("change", clientChanged);
 itemSelect.addEventListener("change", itemChanged);
+customRoomInput.addEventListener("input", customItemChanged);
 customItemInput.addEventListener("input", customItemChanged);
 settingsButton.addEventListener("click", openSettings);
 logoutButton.addEventListener("click", logout);
@@ -101,6 +104,7 @@ async function showSaveForm() {
 			"folders");
 		fillSelect(clientSelect, clients, "Select a client",
 			savedSelection && (savedSelection.projectId || savedSelection.folderName || savedSelection.client));
+		updateJobDetails();
 		setStatus("");
 		if (clientSelect.value) {
 			await loadItems(clientSelect.value, savedSelection &&
@@ -159,6 +163,7 @@ async function login(event) {
 }
 
 async function clientChanged() {
+	updateJobDetails();
 	const client = clientSelect.value;
 	saveButton.disabled = true;
 	hideCustomItemInput();
@@ -181,9 +186,23 @@ async function loadItems(client, selectedItem) {
 		fillSelect(itemSelect, items, "Select an item", selectedItem);
 		itemSelect.add(new Option("Other", OTHER_ITEM_VALUE));
 		itemSelect.disabled = false;
-		if (selectedItem && !items.some(item => item.value == selectedItem)) {
+		const hasStoredOther = savedSelection &&
+			(savedSelection.customRoom !== undefined || savedSelection.customItem !== undefined) &&
+			savedSelection.subFolderName == (selectedItem || "") &&
+			(savedSelection.projectId ? savedSelection.projectId == client :
+				savedSelection.folderName == (clientSelect.selectedOptions[0]?.dataset.folderName || client));
+		if (!items.some(item => item.value == selectedItem) && (selectedItem || hasStoredOther)) {
 			itemSelect.value = OTHER_ITEM_VALUE;
-			customItemInput.value = selectedItem;
+			// Preserve partially entered Other fields across popup reopenings.
+			// Older custom selections may have only one combined folder name.
+			if (hasStoredOther) {
+				customRoomInput.value = savedSelection.customRoom || "";
+				customItemInput.value = savedSelection.customItem || "";
+			} else {
+				const separator = selectedItem.indexOf(" - ");
+				customRoomInput.value = separator >= 0 ? selectedItem.slice(0, separator) : "";
+				customItemInput.value = separator >= 0 ? selectedItem.slice(separator + 3) : selectedItem;
+			}
 		}
 		await itemChanged();
 		setStatus("");
@@ -235,7 +254,8 @@ function normalizeOptions(values, labelKeys, valueKeys) {
 			folderName: value.name ? String(value.name) : "",
 			projectId: value.projectId ? String(value.projectId) : "",
 			customerId: value.customerId ? String(value.customerId) : "",
-			jobNumber: value.jobNumber == null ? "" : String(value.jobNumber)
+			jobNumber: value.jobNumber == null ? "" : String(value.jobNumber),
+			jobDetails: value.jobDetails ? String(value.jobDetails) : ""
 		} : null;
 	}).filter(Boolean);
 }
@@ -244,6 +264,8 @@ function fillSelect(select, options, placeholder, selectedValue) {
 	select.replaceChildren(new Option(placeholder, ""));
 	for (const option of options) {
 		const optionElement = new Option(option.label, option.value);
+		optionElement.title = option.label;
+		if (option.jobDetails) optionElement.dataset.jobDetails = option.jobDetails;
 		if (option.folderName) {
 			optionElement.dataset.folderName = option.folderName;
 		}
@@ -277,6 +299,14 @@ function fillSelect(select, options, placeholder, selectedValue) {
 	}
 }
 
+function updateJobDetails() {
+	const selected = clientSelect.selectedOptions[0];
+	const details = selected && selected.dataset.jobDetails || "";
+	clientJobDetails.textContent = details;
+	clientJobDetails.hidden = !details;
+	clientSelect.title = selected && selected.value ? selected.textContent : "";
+}
+
 function setSelectMessage(select, message) {
 	select.replaceChildren(new Option(message, ""));
 	select.disabled = true;
@@ -285,10 +315,16 @@ function setSelectMessage(select, message) {
 async function itemChanged() {
 	const customItemSelected = itemSelect.value == OTHER_ITEM_VALUE;
 	customItemFields.hidden = !customItemSelected;
+	customRoomInput.required = customItemSelected;
 	customItemInput.required = customItemSelected;
 	if (customItemSelected) {
-		customItemInput.focus();
+		if (!customRoomInput.value) {
+			customRoomInput.focus();
+		} else {
+			customItemInput.focus();
+		}
 	} else {
+		customRoomInput.value = "";
 		customItemInput.value = "";
 	}
 	refreshSaveButton();
@@ -298,6 +334,16 @@ async function itemChanged() {
 async function customItemChanged() {
 	refreshSaveButton();
 	await persistSelection();
+}
+
+function getOtherItemName() {
+	const room = customRoomInput.value.trim();
+	const item = customItemInput.value.trim();
+	return room && item ? `${room} - ${item}` : "";
+}
+
+function getItemName() {
+	return itemSelect.value == OTHER_ITEM_VALUE ? getOtherItemName() : (itemSelect.value || "");
 }
 
 async function persistSelection(itemNameOverride) {
@@ -310,13 +356,16 @@ async function persistSelection(itemNameOverride) {
 		return;
 	}
 	const selectedClient = clientSelect.selectedOptions[0];
-	const itemName = itemNameOverride !== undefined ? itemNameOverride :
-		(itemSelect.value == OTHER_ITEM_VALUE ?
-			customItemInput.value.trim() : (itemSelect.value || ""));
+	const itemName = itemNameOverride !== undefined ? itemNameOverride : getItemName();
+	const isOther = itemSelect.value == OTHER_ITEM_VALUE;
 	const selection = {
 		projectId: selectedClient && selectedClient.dataset.projectId || "",
 		folderName: selectedClient && selectedClient.dataset.folderName || clientSelect.value,
-		subFolderName: itemName
+		subFolderName: itemName,
+		...(isOther ? {
+			customRoom: customRoomInput.value.trim(),
+			customItem: customItemInput.value.trim()
+		} : {})
 	};
 	savedSelection = selection;
 	selectionWritePromise = selectionWritePromise.then(() =>
@@ -327,14 +376,14 @@ async function persistSelection(itemNameOverride) {
 
 function hideCustomItemInput() {
 	customItemFields.hidden = true;
+	customRoomInput.required = false;
+	customRoomInput.value = "";
 	customItemInput.required = false;
 	customItemInput.value = "";
 }
 
 function refreshSaveButton() {
-	const itemName = itemSelect.value == OTHER_ITEM_VALUE ?
-		customItemInput.value.trim() : itemSelect.value;
-	saveButton.disabled = !clientSelect.value || !itemName;
+	saveButton.disabled = !clientSelect.value || !getItemName();
 }
 
 async function savePage(event) {
@@ -342,13 +391,19 @@ async function savePage(event) {
 	setSavePending(true);
 	setStatus("Starting save...");
 	try {
-		const itemName = itemSelect.value == OTHER_ITEM_VALUE ?
-			customItemInput.value.trim() : itemSelect.value;
+		const itemName = getItemName();
+		if (!itemName) {
+			throw new Error("Select an item, or enter both a room and item name for Other.");
+		}
 		const selectedClient = clientSelect.selectedOptions[0];
 		const selection = {
 			projectId: selectedClient && selectedClient.dataset.projectId || "",
 			folderName: selectedClient && selectedClient.dataset.folderName || clientSelect.value,
-			subFolderName: itemName
+			subFolderName: itemName,
+			...(itemSelect.value == OTHER_ITEM_VALUE ? {
+				customRoom: customRoomInput.value.trim(),
+				customItem: customItemInput.value.trim()
+			} : {})
 		};
 		await browser.storage.local.set({ nbClipperPopupSelection: selection });
 		const response = await browser.runtime.sendMessage({
@@ -383,6 +438,7 @@ function setLoginPending(pending) {
 function setSavePending(pending) {
 	clientSelect.disabled = pending;
 	itemSelect.disabled = pending;
+	customRoomInput.disabled = pending;
 	customItemInput.disabled = pending;
 	saveButton.disabled = pending;
 	if (!pending) {
